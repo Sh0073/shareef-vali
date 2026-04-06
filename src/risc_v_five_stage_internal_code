@@ -1,0 +1,1203 @@
+
+`timescale 1ns / 1ps
+
+
+module PC_MUX(
+    input  wire [31:0] pc,
+    input  wire [31:0] branch_address,
+    input  wire [31:0] jump_address,
+    input  wire        branch,
+    input  wire        jump,
+    output reg  [31:0] next_pc
+);
+  always @(*) begin
+    if (branch)      next_pc = branch_address;
+    else if (jump)   next_pc = jump_address;
+    else             next_pc = pc + 32'd4;
+  end
+endmodule
+
+
+`timescale 1ns / 1ps
+
+
+
+module jump_detector_and_jump_address(
+
+
+    input  wire [31:0] pc,
+    input  wire [31:0] instruction,
+    output wire        jump,
+    output wire [31:0] jump_address
+);
+  wire [31:0] imm = {{12{instruction[31]}},
+                     instruction[31],
+                     instruction[19:12],
+                     instruction[20],
+                     instruction[30:21],
+                     1'b0};
+  assign jump         = (instruction[6:0] == 7'b1101111);
+  assign jump_address = pc + imm;
+endmodule
+
+
+`timescale 1ns / 1ps
+module INSTRUCTION_MEMORY(
+    input  wire        clk,
+    input  wire        reset,
+    input  wire [31:0] pc,
+    output wire [31:0] instruction
+);
+    // byte-addressable memory (each element is one byte)
+    reg [7:0] mem [0:65535]; // size adjustable; example 64KB
+
+    // RISC-V is little-endian
+    assign instruction = { mem[pc + 3], mem[pc + 2], mem[pc + 1], mem[pc] };
+
+    initial begin
+
+        $readmemh("program.hex", mem);
+    end
+endmodule
+
+
+
+
+
+`timescale 1ns / 1ps
+
+
+
+module INSTRUCTION_FETCH(
+
+    input  wire        clk,
+    input  wire        reset,
+    input  wire        stall,
+    input  wire        branch,
+    input  wire [31:0] branch_address,
+    output reg  [31:0] pc,
+    output wire [31:0] instruction
+);
+
+  wire [31:0] next_pc, jump_address;
+  wire        jump;
+
+  // Asynchronous reset for PC ensures no X states on deassertion
+  always @(posedge clk or posedge reset) begin
+    if (reset)        pc <= 32'b0;
+    else if (!stall)  pc <= next_pc;
+  end
+
+  // Next-PC selection: branch, jump, or sequential PC+4
+  PC_MUX mux (
+    .pc(pc),
+    .branch_address(branch_address),
+    .jump_address(jump_address),
+    .branch(branch),
+    .jump(jump),
+    .next_pc(next_pc)
+  );
+
+  // Detect jump instructions and compute target address
+  jump_detector_and_jump_address det (
+    .pc(pc),
+    .instruction(instruction),
+    .jump(jump),
+    .jump_address(jump_address)
+  );
+
+  // Big-endian instruction memory with synchronous initialization
+  INSTRUCTION_MEMORY i_mem (
+    .clk(clk),
+    .reset(reset),
+    .pc(pc),
+    .instruction(instruction)
+  );
+endmodule
+
+
+
+`timescale 1ns / 1ps
+
+
+
+module IF_ID(
+input clk,
+input reset,
+
+input [31:0]if_pc,
+input [31:0]if_instruction,
+
+input stall,
+input branch,
+
+output reg [31:0]id_pc,
+output reg [31:0]id_instruction
+    );
+    
+    always @(posedge clk)
+    begin
+        if(reset)
+        begin
+            id_pc<=0;
+            id_instruction<=0;
+        end
+        else
+        begin
+            if(!stall)
+            begin
+                if(branch)
+                begin
+                    id_pc<=0;
+                    id_instruction<=0;
+                end
+                else if(!branch)
+                begin
+                    id_pc<=if_pc;
+                    id_instruction<=if_instruction;
+                end
+            end
+        end
+    end
+endmodule
+
+
+`timescale 1ns / 1ps
+module REGFILE(
+    input           clk,
+    input           reset,
+
+    // read index ports
+    input  [4:0]    s1,
+    input  [4:0]    s2,
+    input  [4:0]    read_rd,    // index to read old RD (for MAC)
+
+    // write-back port
+    input           reg_write,  // write enable from WB stage
+    input  [4:0]    wb_rd,      // destination index from WB stage
+    input  [31:0]   wb_data,    // data to be written at WB
+
+    // read outputs
+    output [31:0]   RS1,
+    output [31:0]   RS2,
+    output [31:0]   RD_OLD     // old value of destination (rd) used by MAC
+);
+
+    integer i;
+    (* ram_style = "distributed" *) reg [31:0] GPP[0:31];
+
+    // Combinational reads
+    assign RS1   = GPP[s1];
+    assign RS2   = GPP[s2];
+    assign RD_OLD = GPP[read_rd];
+
+    // Synchronous write-back
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            for (i = 0; i < 32; i = i + 1)
+                GPP[i] <= 32'b0;
+        end else begin
+            if (reg_write && (wb_rd != 5'd0)) begin
+                GPP[wb_rd] <= wb_data;
+            end
+        end
+    end
+
+endmodule
+
+module CONTROL_UNIT(
+input [6:0]opcode,
+
+output reg [6:0]ex_control,//{pc_or_reg_or_0_select[2bits],imm_or_4_sel[2 bits],alu_op[2 bits],branch}
+output reg [1:0]mem_control,//{mem_read,mem_write}
+output reg [1:0]wb_control, //{mem_data_select,reg_write}
+
+output reg unrecognized
+    );
+    
+    //alu input 1
+    parameter pc=     2'b00;
+    parameter zero=   2'b01;
+    parameter reg_s1= 2'b10;
+   
+    //alu input 2
+    parameter reg_s2= 2'b00;
+    parameter imm=    2'b01;
+    parameter four=   2'b10;
+    
+    //alu op
+    parameter ld_str= 2'b00;
+    parameter brch=   2'b01; 
+    parameter arith=  2'b10;
+    parameter im_op = 2'b11;
+    always@(*)
+    begin
+        case(opcode)
+         7'b0110011://R type
+         begin
+         ex_control=   {reg_s1,reg_s2,arith,1'b0};
+         mem_control=  {1'b0,1'b0};
+         wb_control=   {1'b0,1'b1};
+         unrecognized=1'b0;
+         end
+         
+         7'b0010011://I type
+         begin
+         ex_control=   {reg_s1,imm,im_op,1'b0};
+         mem_control=  {1'b0,1'b0};
+         wb_control=   {1'b0,1'b1};
+         unrecognized=1'b0;
+         end
+         
+         7'b0000011://I type - Load
+         begin
+         ex_control=   {reg_s1,imm,ld_str,1'b0};
+         mem_control=  {1'b1,1'b0};
+         wb_control=   {1'b1,1'b1};   
+         unrecognized=0;  
+         end
+         
+         7'b0100011://S type
+         begin
+         ex_control=   {reg_s1,imm,ld_str,1'b0};
+         mem_control=  {1'b0,1'b1};
+         wb_control=   {1'b0,1'b0};
+         unrecognized=0; 
+         end
+         
+         7'b1100011://Branch type
+         begin
+         ex_control=   {reg_s1,reg_s2,brch,1'b1};
+         mem_control=  {1'b0,1'b0};
+         wb_control=   {1'b0,1'b0};  
+         unrecognized=0;
+         end
+         
+         7'b1101111://Jump and link
+         begin
+         ex_control=   {pc,four,ld_str,1'b0};
+         mem_control=  {1'b0,1'b0};
+         wb_control=   {1'b0,1'b1};  
+         unrecognized=0;
+         end
+         
+         7'b0110111://lui
+         begin
+         ex_control=   {zero,imm,ld_str,1'b0};
+         mem_control=  {1'b0,1'b0};
+         wb_control=   {1'b0,1'b1};    
+         unrecognized=0;    
+         end
+         
+         7'b0010111://AUIPC
+         begin
+         ex_control=   {pc,imm,ld_str,1'b0};
+         mem_control=  {1'b0,1'b0};
+         wb_control=   {1'b0,1'b1};  
+         unrecognized=0;
+         end
+         
+         default:
+         begin
+         ex_control= 0;
+         mem_control=  {1'b0,1'b0};
+         wb_control=   {1'b0,1'b0}; 
+         unrecognized=1'b1;
+         end   
+        endcase
+    end
+    
+    
+endmodule
+  
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/13/2024 06:18:06 PM
+// Design Name: 
+// Module Name: stalling_mux
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module stalling_mux(
+input [6:0]ex_control_temp,
+input [1:0]mem_control_temp,
+input [1:0]wb_control_temp,
+
+input stall,
+
+output [6:0]ex_control,
+output [1:0]mem_control,
+output [1:0]wb_control
+    );
+    
+    assign ex_control=  stall?0:ex_control_temp;
+    assign mem_control= stall?0:mem_control_temp;
+    assign wb_control=  stall?0:wb_control_temp;
+
+endmodule
+
+
+`timescale 1ns / 1ps
+module SIGN_EXTEND(
+    input  [31:0] instruction,
+    output reg [31:0] sign_ext_imm
+);
+
+    wire [6:0] opcode = instruction[6:0];
+
+    always @(*) begin
+        case (opcode)
+            // I-type arithmetic / loads / JALR
+            7'b0010011, // arithmetic immediate (ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI/SRAI)
+            7'b0000011, // loads
+            7'b1100111: // JALR
+            begin
+                // sign-extend bits [31:20] for all I-type immediates
+                sign_ext_imm = {{20{instruction[31]}}, instruction[31:20]};
+            end
+
+            // S-type (store): imm[11:5] in [31:25], imm[4:0] in [11:7]
+            7'b0100011: begin
+                sign_ext_imm = {{20{instruction[31]}}, instruction[31:25], instruction[11:7]};
+            end
+
+            // B-type (branch): imm bits scattered, always sign-extended
+            7'b1100011: begin
+                // imm[12] = inst[31], imm[11] = inst[7], imm[10:5]=inst[30:25], imm[4:1]=inst[11:8], imm[0]=0
+                sign_ext_imm = {{19{instruction[31]}}, instruction[31], instruction[7], instruction[30:25], instruction[11:8], 1'b0};
+            end
+
+            // U-type (LUI/AUIPC): imm = inst[31:12] << 12 (no sign-extension beyond placing bits in high 20)
+            7'b0110111, 7'b0010111: begin
+                sign_ext_imm = {instruction[31:12], 12'b0};
+            end
+
+            // J-type (JAL)
+            7'b1101111: begin
+                // imm[20]=inst[31], imm[10:1]=inst[30:21], imm[11]=inst[20], imm[19:12]=inst[19:12], imm[0]=0
+                sign_ext_imm = {{11{instruction[31]}},
+                                instruction[31],
+                                instruction[19:12],
+                                instruction[20],
+                                instruction[30:21],
+                                1'b0};
+            end
+
+            default: begin
+                sign_ext_imm = 32'b0;
+            end
+        endcase
+    end
+
+endmodule
+
+
+
+`timescale 1ns / 1ps
+module DECODE(
+    input clk,
+    input reset,
+
+    input  [31:0] instruction,
+
+    input         wb_reg_write,
+    input  [4:0]  wb_rd,
+    input  [31:0] wb_data,
+
+    input         stall,
+
+    // outputs
+    output [6:0]  ex_control,
+    output [1:0]  mem_control,
+    output [1:0]  wb_control,
+
+    output [31:0] rs1,
+    output [31:0] rs2,
+    output [31:0] immediate,
+    output [31:0] rd_old,       // old value of rd for MAC (from REGFILE)
+
+    output        unrecognized
+);
+
+    wire [6:0] ex_control_temp;
+    wire [1:0] mem_control_temp;
+    wire [1:0] wb_control_temp;
+
+    wire [4:0] s1 = instruction[19:15];
+    wire [4:0] s2 = instruction[24:20];
+    wire [4:0] rd = instruction[11:7];
+
+    // Register File Instance (read_rd is the current instruction's rd)
+    REGFILE r1(
+        .clk(clk),
+        .reset(reset),
+        .s1(s1),
+        .s2(s2),
+        .read_rd(rd),          // new read index for old rd
+        .reg_write(wb_reg_write),
+        .wb_rd(wb_rd),
+        .wb_data(wb_data),
+        .RS1(rs1),
+        .RS2(rs2),
+        .RD_OLD(rd_old)
+    );
+
+    // Control Unit
+    CONTROL_UNIT c1(
+        .opcode(instruction[6:0]),
+        .ex_control(ex_control_temp),
+        .mem_control(mem_control_temp),
+        .wb_control(wb_control_temp),
+        .unrecognized(unrecognized)
+    );
+
+    // Stall handling (if stall asserted, replace controls with 0 to insert bubble)
+    stalling_mux st_unit(
+        .ex_control_temp(ex_control_temp),
+        .mem_control_temp(mem_control_temp),
+        .wb_control_temp(wb_control_temp),
+        .stall(stall),
+        .ex_control(ex_control),
+        .mem_control(mem_control),
+        .wb_control(wb_control)
+    );
+
+    // Immediate generation
+    SIGN_EXTEND se_unit(
+        .instruction(instruction),
+        .sign_ext_imm(immediate)
+    );
+
+
+endmodule
+
+`timescale 1ns / 1ps
+module ID_EX(
+    input clk,
+    input reset,
+
+    input branch,
+
+    // Inputs from DECODE stage
+    input [4:0] id_rd,
+    input [31:0] id_pc,
+    input [31:0] id_rs1,
+    input [31:0] id_rs2,
+    input [31:0] id_immediate,
+    input [31:0] id_rd_old,       // Old RD value (MAC)
+
+    input [2:0] id_funct_3,
+    input [6:0] id_funct_7,
+
+    input [6:0] id_ex_control,
+    input [1:0] id_mem_control,
+    input [1:0] id_wb_control,
+
+    input [4:0] id_Rs1,
+    input [4:0] id_Rs2,
+    input [6:0] id_opcode,
+
+    // Outputs to EXECUTE stage
+    output reg [4:0] ex_rd,
+    output reg [31:0] ex_pc,
+    output reg [31:0] ex_rs1,
+    output reg [31:0] ex_rs2,
+    output reg [31:0] ex_immediate,
+    output reg [31:0] ex_rd_old,  // Pipelined old RD for MAC
+
+    output reg [2:0] ex_funct_3,
+    output reg [6:0] ex_funct_7,
+
+    output reg [6:0] ex_ex_control,
+    output reg [1:0] ex_mem_control,
+    output reg [1:0] ex_wb_control,
+
+    output reg [4:0] ex_Rs1,
+    output reg [4:0] ex_Rs2,
+    output reg [6:0] ex_opcode
+);
+
+    always @(posedge clk) begin
+        if (reset | branch) begin
+            ex_rd          <= 0;
+            ex_pc          <= 0;
+            ex_rs1         <= 0;
+            ex_rs2         <= 0;
+            ex_immediate   <= 0;
+            ex_rd_old      <= 0;
+            ex_funct_3     <= 0;
+            ex_funct_7     <= 0;
+            ex_ex_control  <= 0;
+            ex_mem_control <= 0;
+            ex_wb_control  <= 0;
+            ex_Rs1         <= 0;
+            ex_Rs2         <= 0;
+            ex_opcode      <= 0;
+        end else begin
+            ex_rd          <= id_rd;
+            ex_pc          <= id_pc;
+            ex_rs1         <= id_rs1;
+            ex_rs2         <= id_rs2;
+            ex_immediate   <= id_immediate;
+            ex_rd_old      <= id_rd_old;     // Pass MAC old RD value
+            ex_funct_3     <= id_funct_3;
+            ex_funct_7     <= id_funct_7;
+            ex_ex_control  <= id_ex_control;
+            ex_mem_control <= id_mem_control;
+            ex_wb_control  <= id_wb_control;
+            ex_Rs1         <= id_Rs1;
+            ex_Rs2         <= id_Rs2;
+            ex_opcode      <= id_opcode;
+        end
+    end
+
+endmodule
+
+
+`timescale 1ns / 1ps
+module ALU_CONTROL(
+    input  [1:0] alu_op,
+    input  [2:0] funct_3,
+    input  [6:0] funct_7,
+    output reg [4:0] alu_control
+);
+
+always @(*) begin
+    case(alu_op)
+        2'b00: alu_control = 5'd0; // Load/Store ADD
+        2'b01: alu_control = 5'd1; // Branch SUB
+        2'b10: begin // R-type RV32I, RV32M, CNN
+            case(funct_7)
+                7'b0000000: case(funct_3)
+                    3'b000: alu_control = 5'd0; // ADD
+                    3'b001: alu_control = 5'd5; // SLL
+                    3'b010: alu_control = 5'd8; // SLT
+                    3'b011: alu_control = 5'd9; // SLTU
+                    3'b100: alu_control = 5'd2; // XOR
+                    3'b101: alu_control = 5'd6; // SRL
+                    3'b110: alu_control = 5'd3; // OR
+                    3'b111: alu_control = 5'd4; // AND
+                    default: alu_control = 5'd0;
+                endcase
+                7'b0100000: case(funct_3)
+                    3'b000: alu_control = 5'd1; // SUB
+                    3'b101: alu_control = 5'd7; // SRA
+                    default: alu_control = 5'd0;
+                endcase
+                7'b0000001: case(funct_3) // RV32M
+                    3'b000: alu_control = 5'd10; // MUL
+                    3'b001: alu_control = 5'd11; // MULH
+                    3'b010: alu_control = 5'd12; // MULHSU
+                    3'b011: alu_control = 5'd13; // MULHU
+                    3'b100: alu_control = 5'd14; // DIV
+                    3'b101: alu_control = 5'd15; // DIVU
+                    3'b110: alu_control = 5'd16; // REM
+                    3'b111: alu_control = 5'd17; // REMU
+                    default: alu_control = 5'd0;
+                endcase
+                7'b0101010: case(funct_3) // CNN
+                    3'b000: alu_control = 5'd18; // MAC
+                    3'b001: alu_control = 5'd21; // RELU
+                    3'b010: alu_control = 5'd19; // MAXPOOL
+                    3'b011: alu_control = 5'd20; // AVGPOOL
+                    default: alu_control = 5'd0;
+                endcase
+                default: alu_control = 5'd0;
+            endcase
+        end
+        2'b11: begin // I-type
+            case(funct_3)
+                3'b000: alu_control = 5'd0; // ADDI
+                3'b010: alu_control = 5'd8; // SLTI
+                3'b011: alu_control = 5'd9; // SLTIU
+                3'b100: alu_control = 5'd2; // XORI
+                3'b110: alu_control = 5'd3; // ORI
+                3'b111: alu_control = 5'd4; // ANDI
+                3'b001: alu_control = 5'd5; // SLLI
+                3'b101: alu_control = (funct_7==7'b0000000)?5'd6: (funct_7==7'b0100000)?5'd7:5'd0; // SRLI/SRAI
+                default: alu_control = 5'd0;
+            endcase
+        end
+        default: alu_control = 5'd0;
+    endcase
+end
+endmodule
+  
+`timescale 1ns / 1ps
+module ALU(
+    input  [31:0] a,
+    input  [31:0] b,
+    input  [31:0] rd_in,     // old RD value for MAC
+    input  [4:0]  control,   // 5-bit
+    output reg [31:0] c
+);
+
+always @(*) begin
+    case(control)
+        // RV32I
+        5'd0:  c = a + b;           
+        5'd1:  c = a - b;           
+        5'd2:  c = a ^ b;           
+        5'd3:  c = a | b;           
+        5'd4:  c = a & b;           
+        5'd5:  c = a << b[4:0];     
+        5'd6:  c = a >> b[4:0];     
+        5'd7:  c = $signed(a) >>> b[4:0];
+        5'd8:  c = ($signed(a) < $signed(b)) ? 1 : 0;
+        5'd9:  c = (a < b) ? 1 : 0;
+        // RV32M
+        5'd10: c = a * b;
+        5'd11: c = ($signed(a) * $signed(b)) >> 32;
+        5'd12: c = ($signed(a) * b) >> 32;
+        5'd13: c = (a * b) >> 32;
+        5'd14: c = (b != 0) ? $signed(a)/$signed(b) : 32'hFFFFFFFF;
+        5'd15: c = (b != 0) ? a / b : 32'hFFFFFFFF;
+        5'd16: c = (b != 0) ? $signed(a)%$signed(b) : a;
+        5'd17: c = (b != 0) ? a % b : a;
+        // CNN
+        5'd18: c = a * b + rd_in;       // MAC
+        5'd19: c = (a > b) ? a : b;     // MAXPOOL
+        5'd20: c = (a + b) >> 1;        // AVGPOOL
+        5'd21: c = (a > 0) ? a : 0;     // RELU
+        default: c = 0;
+    endcase
+end
+endmodule
+
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/13/2024 07:05:36 PM
+// Design Name: 
+// Module Name: BRANCH_CONDITION_CHECKER
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module BRANCH_CONDITION_CHECKER(
+input [31:0]input1,
+input [31:0]input2,
+input [2:0] funct_3,
+
+output reg branch_cond
+    );
+    
+    always @(*)
+    begin
+        case(funct_3)
+            0:branch_cond=(input1 == input2);
+            1:branch_cond=(input1 != input2);
+            4:branch_cond=($signed(input1)<$signed(input2));
+            5:branch_cond=($signed(input1)>=$signed(input2));
+            6:branch_cond=(input1<input2);
+            7:branch_cond=(input1>=input2);
+            default:branch_cond=0;
+        endcase
+    end
+    
+endmodule
+
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/13/2024 06:53:24 PM
+// Design Name: 
+// Module Name: MUX_3_TO_1
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module MUX_3_TO_1(
+input [31:0]input_1,
+input [31:0]input_2,
+input [31:0]input_3,
+
+input [1:0]control,
+
+output reg [31:0]selected_output
+    );
+    
+    always @(*)
+    begin
+        case(control)
+            0:selected_output=input_1;
+            1:selected_output=input_2;
+            2:selected_output=input_3;
+            default:selected_output=0;
+        endcase
+    end
+endmodule
+
+
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Execute Stage with MAC / CNN / RV32I / RV32M support
+//////////////////////////////////////////////////////////////////////////////////
+module EXECUTE_STAGE(
+    input  [31:0] pc,
+    input  [31:0] rs1,        // forwarding applied
+    input  [31:0] rs2,        // forwarding applied
+    input  [31:0] imm,
+    input  [6:0] ex_control,
+    input  [2:0] funct_3,
+    input  [6:0] funct_7,
+    input  [31:0] rd_old,     // old RD value for MAC
+
+    output [31:0] result,
+    output [31:0] branch_address,
+    output branch
+);
+
+    // Internal wires
+    wire [31:0] alu_input_1;
+    wire [31:0] alu_input_2;
+    wire [4:0]  alu_control;     // 5-bit for MAC/CNN
+    wire branch_cond;
+    wire [1:0] alu_op = ex_control[2:1];
+
+    // ALU input selection
+    MUX_3_TO_1 m1(
+        .input_1(pc),
+        .input_2(32'd0),
+        .input_3(rs1),
+        .control(ex_control[6:5]),
+        .selected_output(alu_input_1)
+    );
+
+    MUX_3_TO_1 m2(
+        .input_1(rs2),
+        .input_2(imm),
+        .input_3(32'd4),
+        .control(ex_control[4:3]),
+        .selected_output(alu_input_2)
+    );
+
+    // ALU control
+    ALU_CONTROL ac1(
+        .alu_op(alu_op),
+        .funct_3(funct_3),
+        .funct_7(funct_7),
+        .alu_control(alu_control)
+    );
+
+    // ALU
+    ALU a1(
+        .a(alu_input_1),
+        .b(alu_input_2),
+        .rd_in(rd_old),       // old RD for MAC
+        .control(alu_control),
+        .c(result)
+    );
+
+    // Branch condition
+    BRANCH_CONDITION_CHECKER b1(
+        .input1(alu_input_1),
+        .input2(alu_input_2),
+        .funct_3(funct_3),
+        .branch_cond(branch_cond)
+    );
+
+    // Branch output
+    assign branch = ex_control[0] & branch_cond;
+    assign branch_address = pc + imm;
+
+endmodule
+  
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// EX/MEM Pipeline Register
+//////////////////////////////////////////////////////////////////////////////////
+module EX_MEM(
+    input clk,
+    input reset,
+
+    input [4:0]  ex_rd,
+    input [1:0]  ex_mem_control,
+    input [1:0]  ex_wb_control,
+    input        ex_branch,
+    input [31:0] ex_rs2,
+    input [31:0] ex_result,
+    input [31:0] ex_branch_address,
+
+    output reg [4:0]  mem_rd,
+    output reg [1:0]  mem_mem_control,
+    output reg [1:0]  mem_wb_control,
+    output reg        mem_branch,
+    output reg [31:0] mem_write_data,
+    output reg [31:0] mem_result,
+    output reg [31:0] mem_branch_address
+);
+
+    always @(posedge clk) begin
+        if (reset) begin
+            mem_rd           <= 0;
+            mem_mem_control  <= 0;
+            mem_wb_control   <= 0;
+            mem_branch       <= 0;
+            mem_write_data   <= 0;
+            mem_result       <= 0;
+            mem_branch_address <= 0;
+        end else begin
+            mem_rd           <= ex_rd;
+            mem_mem_control  <= ex_mem_control;
+            mem_wb_control   <= ex_wb_control;
+            mem_branch       <= ex_branch;
+            mem_write_data   <= ex_rs2;
+            mem_result       <= ex_result;
+            mem_branch_address <= ex_branch_address;
+        end
+    end
+
+endmodule
+
+
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/13/2024 10:32:58 PM
+// Design Name: 
+// Module Name: MEM_STAGE
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+`timescale 1ns / 1ps
+module MEM_STAGE(
+    input         clk,
+    input         reset,
+    input  [31:0] address,
+    input  [1:0]  mem_control, // {mem_read, mem_write}
+    input  [31:0] write_data,
+    output [31:0] read_data
+);
+
+    (* ram_style = "block" *) reg [7:0] mem [0:1023]; // 1KB example
+
+    // Combinational read: assemble little-endian word
+    assign read_data = mem_control[1] ? { mem[address + 3], mem[address + 2], mem[address + 1], mem[address] } : 32'b0;
+
+    // Synchronous write (non-blocking)
+    always @(posedge clk) begin
+        if (reset) begin
+            // Optionally initialize memory or leave contents unchanged
+            // For example purpose only:
+            mem[4] <= 8'h01;
+            mem[5] <= 8'h00;
+            mem[6] <= 8'h00;
+            mem[7] <= 8'h00;
+        end else begin
+            if (mem_control[0]) begin // mem_write
+                mem[address + 0] <= write_data[ 7: 0];
+                mem[address + 1] <= write_data[15: 8];
+                mem[address + 2] <= write_data[23:16];
+                mem[address + 3] <= write_data[31:24];
+            end
+        end
+    end
+endmodule
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/13/2024 10:46:58 PM
+// Design Name: 
+// Module Name: MEM_WB
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module MEM_WB(
+input clk,
+input reset,
+
+input [4:0]mem_rd,
+input [1:0]mem_wb_control,
+
+input [31:0]mem_result,
+input [31:0]read_data,
+
+output reg [4:0] wb_rd,
+output reg [1:0] wb_control,
+
+output reg [31:0]wb_result,
+output reg [31:0]wb_read_data
+    );
+    
+    always @(posedge clk)
+    begin
+    
+    if(reset)
+    begin
+        wb_rd<=0;     
+        wb_control<=0;  
+                 
+        wb_result<=0;
+        wb_read_data<=0;
+    end
+    
+    else
+    begin
+        wb_rd<=mem_rd;     
+        wb_control<=mem_wb_control;
+                 
+        wb_result<=mem_result;
+        wb_read_data<=read_data;
+    end
+    
+    end
+    
+    
+endmodule
+
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/13/2024 11:05:17 PM
+// Design Name: 
+// Module Name: FORWARDING_UNIT
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module FORWARDING_UNIT(
+input ex_mem_reg_write,
+input mem_wb_reg_write,
+
+input [4:0]ex_mem_rd,
+input [4:0]mem_wb_rd,
+
+input [4:0]id_ex_rs1,
+input [4:0]id_ex_rs2,
+
+input [6:0]id_ex_opcode,//to specifically check that the instruction is not I type
+
+output reg [1:0]forward_m1,
+output reg [1:0]forward_m2
+    );
+    
+    initial forward_m1=0;
+    initial forward_m2=0;
+    
+    always @(*)
+    begin
+    if(!((id_ex_opcode==7'b1101111)|(id_ex_opcode==7'b010111)))
+    begin
+    
+            if((ex_mem_reg_write)&(id_ex_rs1==ex_mem_rd) & (ex_mem_rd!=0))
+            begin
+               forward_m1=2'b01;
+            end
+            
+            else if((mem_wb_reg_write)&(id_ex_rs1==mem_wb_rd) & (mem_wb_rd!=0) ) 
+            begin
+               forward_m1=2'b10;
+            end
+            
+            else forward_m1=2'b00;
+    end
+else forward_m1=2'b00;
+end
+    
+    always @(*)
+    begin
+    if((id_ex_opcode==7'b0110011)|(id_ex_opcode==7'b0100011)|(id_ex_opcode==7'b1100011))
+    begin
+            if((ex_mem_reg_write)&(id_ex_rs2==ex_mem_rd) & (ex_mem_rd!=0) )
+            begin
+                forward_m2=2'b01;
+            end 
+            
+            else if((mem_wb_reg_write)&(id_ex_rs2==mem_wb_rd) & (mem_wb_rd!=0) ) 
+            begin
+                forward_m2=2'b10;
+            end
+            
+            else forward_m2=2'b00;
+    end
+    
+    else    forward_m2=2'b00;
+  
+    end
+
+    
+endmodule
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/22/2024 04:17:51 AM
+// Design Name: 
+// Module Name: FORWARDING_MUXES
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module FORWARDING_MUXES(
+input [31:0]a,
+input [31:0]b,
+input [31:0]c,
+input [1:0]control,
+
+output reg [31:0]result
+    );
+    always @(*)
+    begin
+    case(control)
+    0:result=a;
+    1:result=b;
+    2:result=c;
+    default:result=a;
+    endcase
+    end
+endmodule
+
+
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company: 
+// Engineer: 
+// 
+// Create Date: 04/13/2024 11:05:02 PM
+// Design Name: 
+// Module Name: STALLING UNIT
+// Project Name: 
+// Target Devices: 
+// Tool Versions: 
+// Description: 
+// 
+// Dependencies: 
+// 
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+// 
+//////////////////////////////////////////////////////////////////////////////////
+
+
+module STALLING_UNIT(
+
+input [6:0]if_id_opcode,
+
+input [4:0]id_ex_rd,
+input id_ex_mem_read,
+
+input [4:0]if_id_rs1,
+input [4:0]if_id_rs2,
+
+output stall
+    );
+    
+    reg c1,c2,c3;
+    
+    always @(*)
+    
+    begin
+    
+    c1=(!((if_id_opcode==7'b1101111)|(if_id_opcode==7'b010111)))&(id_ex_rd==if_id_rs1);
+    
+    c2=(((if_id_opcode==7'b0110011)|(if_id_opcode==7'b0100011)|(if_id_opcode==7'b1100011))&(id_ex_rd==if_id_rs2));
+    
+    c3=(id_ex_rd!=0);
+    end
+    
+assign stall=(id_ex_mem_read && (c1 | c2)&&c3);
+    
+    
+    
+endmodule
+
+ 
+
+
