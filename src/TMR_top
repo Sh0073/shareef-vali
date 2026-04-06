@@ -1,0 +1,723 @@
+// Code your design here
+`include "risc_v.v"
+`include "code2.v"
+module tmr_risc_v_system (
+    input wire clk,
+    input wire rst,
+    input wire [31:0] instruction,
+    input wire [31:0] data_memory_read,
+    // Fault Injection Inputs
+input wire fault_enable,
+  input wire [2:0] fault_core_select,   // 00=A, 01=B, 10=C
+input wire [4:0] fault_bit_position,  // bit to flip (0-31)
+    output wire [31:0] final_pc,
+    output wire [31:0] final_alu_result,
+    output wire [31:0] final_write_data,
+    output wire [31:0] final_data_addr,
+    output wire final_mem_write,
+    output wire final_mem_read,
+    output wire error_detected,
+    output wire recovery_active,
+  output [31:0] total_cycles_out,
+output [31:0] mismatch_count_out,
+output [31:0] partial_fault_out,
+output [31:0] full_fault_out,
+output [31:0] injected_fault_out,
+output system_failure_out
+);
+
+    // Core A signals - PROPERLY DECLARED
+    wire [31:0] core_a_pc, core_a_alu_result, core_a_write_data, core_a_data_addr;
+    wire core_a_mem_write, core_a_mem_read, core_a_reg_write;
+    wire core_a_unrecognized;
+    wire [31:0] core_a_wb_data;
+    
+    // Core B signals - PROPERLY DECLARED
+    wire [31:0] core_b_pc, core_b_alu_result, core_b_write_data, core_b_data_addr;
+    wire core_b_mem_write, core_b_mem_read, core_b_reg_write;
+    wire core_b_unrecognized;
+    wire [31:0] core_b_wb_data;
+    
+    // Core C signals - PROPERLY DECLARED
+    wire [31:0] core_c_pc, core_c_alu_result, core_c_write_data, core_c_data_addr;
+    wire core_c_mem_write, core_c_mem_read, core_c_reg_write;
+    wire core_c_unrecognized;
+    wire [31:0] core_c_wb_data;
+    
+    // Voter signals
+    wire [2:0] voter_state;
+    wire [31:0] voted_alu_result, voted_write_data, voted_pc;
+    wire voted_mem_write;
+    
+    // Control signals - PROPERLY DECLARED
+    wire mux_instr_sel;
+    wire [31:0] lockstep_instruction;
+    wire recovery_mode, lockstep_mode;
+    wire mux_data_sel, demux_sel;
+    wire rollback_enable, partial_rollback, full_rollback;
+    wire [31:0] recovery_read_data, recovery_pc_restore;
+// ==============================
+// Reliability Monitoring Registers
+// ==============================
+
+reg [31:0] total_cycles;
+reg [31:0] mismatch_count;
+reg [31:0] partial_fault_count;
+reg [31:0] full_fault_count;
+reg [31:0] recovery_count;
+reg [31:0] lockstep_count;
+    
+    // Input multiplexer for instruction selection
+    wire [31:0] selected_instruction;
+    assign selected_instruction = mux_instr_sel ? lockstep_instruction : instruction;
+    
+    // Instantiate three RISC-V cores with COMPLETE port connections
+    RISC_V_PROCESSOR core_a (
+        .clk(clk),
+        .reset(rst),
+        .instruction(selected_instruction),
+        .read_data(data_memory_read),
+        .pc(core_a_pc),
+        .alu_result(core_a_alu_result),
+        .write_data(core_a_write_data),
+        .data_addr(core_a_data_addr),
+        .mem_write(core_a_mem_write),
+        .mem_read(core_a_mem_read),
+        .reg_write(core_a_reg_write),
+        .unrecognized(core_a_unrecognized),
+        .wb_data(core_a_wb_data)
+    );
+    
+    RISC_V_PROCESSOR core_b (
+        .clk(clk),
+        .reset(rst),
+        .instruction(selected_instruction),
+        .read_data(data_memory_read),
+        .pc(core_b_pc),
+        .alu_result(core_b_alu_result),
+        .write_data(core_b_write_data),
+        .data_addr(core_b_data_addr),
+        .mem_write(core_b_mem_write),
+        .mem_read(core_b_mem_read),
+        .reg_write(core_b_reg_write),
+        .unrecognized(core_b_unrecognized),
+        .wb_data(core_b_wb_data)
+    );
+    
+    RISC_V_PROCESSOR core_c (
+        .clk(clk),
+        .reset(rst),
+        .instruction(selected_instruction),
+        .read_data(data_memory_read),
+        .pc(core_c_pc),
+        .alu_result(core_c_alu_result),
+        .write_data(core_c_write_data),
+        .data_addr(core_c_data_addr),
+        .mem_write(core_c_mem_write),
+        .mem_read(core_c_mem_read),
+        .reg_write(core_c_reg_write),
+        .unrecognized(core_c_unrecognized),
+        .wb_data(core_c_wb_data)
+    );
+
+  
+// ==============================
+// Hardware Fault Injection Block
+// ==============================
+
+
+reg fault_enable_d;
+reg [31:0] injected_fault_count;
+
+always @(posedge clk or posedge rst) begin
+    if (rst)
+        fault_enable_d <= 0;
+    else
+        fault_enable_d <= fault_enable;
+end  
+
+wire [31:0] core_a_faulted;
+wire [31:0] core_b_faulted;
+wire [31:0] core_c_faulted;
+
+// Bit flip mask
+wire [31:0] fault_mask;
+
+assign fault_mask = (32'h1 << fault_bit_position);
+ 
+
+// Inject SEU-like transient fault
+assign core_a_faulted =
+    (fault_enable && fault_core_select[0]) ?
+    (core_a_alu_result ^ fault_mask) :
+    core_a_alu_result;
+
+assign core_b_faulted =
+    (fault_enable && fault_core_select[1]) ?
+    (core_b_alu_result ^ fault_mask) :
+    core_b_alu_result;
+
+assign core_c_faulted =
+    (fault_enable && fault_core_select[2]) ?
+    (core_c_alu_result ^ fault_mask) :
+    core_c_alu_result;
+  
+// ----------------------------------
+// Fault Injection Event Detection
+// ----------------------------------
+always @(posedge clk or posedge rst) begin
+    if (rst)
+        injected_fault_count <= 0;
+    else if (fault_enable && !fault_enable_d)
+        injected_fault_count <= injected_fault_count + 1;
+end
+reg [31:0] system_failure_count;
+
+always @(posedge clk or posedge rst) begin
+    if (rst)
+        system_failure_count <= 0;
+    else if (voter_state == 3'b000)
+        system_failure_count <= system_failure_count + 1;
+end
+  
+
+ // =====================================================
+// PIPELINE-SAFE TEMPORAL REDUNDANCY (WB STAGE)
+// =====================================================
+
+reg [31:0] prev_commit_pc;
+reg [31:0] prev_commit_data;
+reg temporal_error;
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        prev_commit_pc   <= 32'd0;
+        prev_commit_data <= 32'd0;
+        temporal_error   <= 1'b0;
+    end
+    else begin
+        // Only check when instruction commits
+        if (core_a_reg_write && core_b_reg_write && core_c_reg_write) begin
+
+            if (prev_commit_pc == voted_pc) begin
+                if (prev_commit_data != voted_write_data)
+                    temporal_error <= 1'b1;
+            end
+
+            prev_commit_pc   <= voted_pc;
+            prev_commit_data <= voted_write_data;
+        end
+    end
+end
+  
+  
+
+  
+    // Instantiate voter block with complete connections
+    voter_block voter (
+         .core_a_alu(core_a_faulted),
+         .core_b_alu(core_b_faulted),
+         .core_c_alu(core_c_faulted),
+        .core_a_pc(core_a_pc),
+        .core_b_pc(core_b_pc),
+        .core_c_pc(core_c_pc),
+        .core_a_mem_write(core_a_mem_write),
+        .core_b_mem_write(core_b_mem_write),
+        .core_c_mem_write(core_c_mem_write),
+        .core_a_write_data(core_a_write_data),
+        .core_b_write_data(core_b_write_data),
+        .core_c_write_data(core_c_write_data),
+        .voter_state(voter_state),
+        .voted_alu_result(voted_alu_result),
+        .voted_pc(voted_pc),
+        .voted_mem_write(voted_mem_write),
+        .voted_write_data(voted_write_data)
+    );
+  
+  
+  
+// =====================================================
+// CORE HEALTH MONITOR
+// =====================================================
+
+reg core_a_healthy;
+reg core_b_healthy;
+reg core_c_healthy;
+
+// =====================================================
+// CORE HEALTH MONITOR
+// =====================================================
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        core_a_healthy <= 1'b1;
+        core_b_healthy <= 1'b1;
+        core_c_healthy <= 1'b1;
+    end
+    else begin
+
+        case (voter_state)
+
+            3'b111: begin
+                // All good → restore all cores
+                core_a_healthy <= 1'b1;
+                core_b_healthy <= 1'b1;
+                core_c_healthy <= 1'b1;
+            end
+
+            3'b110: core_c_healthy <= 1'b0;
+            3'b101: core_b_healthy <= 1'b0;
+            3'b011: core_a_healthy <= 1'b0;
+
+            default: ;  // keep previous state
+        endcase
+
+    end
+end
+/////////////////////////////////////////////////////
+// ADAPTIVE MODE DETECTOR
+/////////////////////////////////////////////////////
+
+reg [8*10:1] adaptive_mode;
+integer healthy_count;
+
+always @(*) begin
+
+    healthy_count =
+        (core_a_healthy ? 1 : 0) +
+        (core_b_healthy ? 1 : 0) +
+        (core_c_healthy ? 1 : 0);
+
+    case (healthy_count)
+        3: adaptive_mode = "TMR";
+        2: adaptive_mode = "DUAL";
+        1: adaptive_mode = "SINGLE";
+        0: adaptive_mode = "FAIL";
+        default: adaptive_mode = "UNK";
+    endcase
+
+end
+// =====================================================
+// FAULT CLASSIFICATION UNIT (Integrated)
+// =====================================================
+
+// Per-core error counters
+reg [7:0] core_a_error_cnt;
+reg [7:0] core_b_error_cnt;
+reg [7:0] core_c_error_cnt;
+
+parameter PERM_THRESHOLD = 8'd5;
+
+// Permanent fault flags
+wire core_a_permanent_fault;
+wire core_b_permanent_fault;
+wire core_c_permanent_fault;
+
+// Classification outputs
+wire transient_fault_flag;
+wire permanent_fault_flag;
+wire common_mode_fault_flag;
+wire temporal_fault_flag;
+
+// -------------------------------------
+// Error Counter Update
+// -------------------------------------
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        core_a_error_cnt <= 8'd0;
+        core_b_error_cnt <= 8'd0;
+        core_c_error_cnt <= 8'd0;
+    end
+    else begin
+        case (voter_state)
+            3'b011: core_a_error_cnt <= core_a_error_cnt + 1'b1; // A faulty
+            3'b101: core_b_error_cnt <= core_b_error_cnt + 1'b1; // B faulty
+            3'b110: core_c_error_cnt <= core_c_error_cnt + 1'b1; // C faulty
+            default: ; // no increment
+        endcase
+    end
+end
+
+// -------------------------------------
+// Permanent Fault Detection
+// -------------------------------------
+
+assign core_a_permanent_fault = (core_a_error_cnt > PERM_THRESHOLD);
+assign core_b_permanent_fault = (core_b_error_cnt > PERM_THRESHOLD);
+assign core_c_permanent_fault = (core_c_error_cnt > PERM_THRESHOLD);
+
+assign permanent_fault_flag =
+        core_a_permanent_fault |
+        core_b_permanent_fault |
+        core_c_permanent_fault;
+
+// -------------------------------------
+// Common Mode Fault (All disagree)
+// -------------------------------------
+
+assign common_mode_fault_flag = (voter_state == 3'b000);
+
+// -------------------------------------
+// Transient Fault
+// -------------------------------------
+
+assign transient_fault_flag =
+        (voter_state != 3'b111) &&     // mismatch exists
+        (voter_state != 3'b000) &&     // not common mode
+        !permanent_fault_flag;         // not permanent
+
+// -------------------------------------
+// Temporal Fault Classification
+// -------------------------------------
+
+assign temporal_fault_flag = temporal_error; 
+  
+  
+  
+  
+// =====================================================
+// MODE STATISTICS COUNTERS (For Reliability Modeling)
+// =====================================================
+
+reg [31:0] tmr_mode_cycles;
+reg [31:0] dual_mode_cycles;
+reg [31:0] single_mode_cycles;
+  
+// =====================================================
+// MODE STATISTICS TRACKING
+// =====================================================
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        tmr_mode_cycles    <= 32'd0;
+        dual_mode_cycles   <= 32'd0;
+        single_mode_cycles <= 32'd0;
+    end
+    else begin
+        case (healthy_count)
+            2'd3: tmr_mode_cycles    <= tmr_mode_cycles + 1;
+            2'd2: dual_mode_cycles   <= dual_mode_cycles + 1;
+            2'd1: single_mode_cycles <= single_mode_cycles + 1;
+            default: ; // system failure (0 healthy)
+        endcase
+    end
+end
+  
+
+ // =====================================================
+// RELIABILITY MODELING REGISTERS (FIXED-POINT SAFE)
+// =====================================================
+
+parameter SCALE = 100000;   // 1.0 = 100000 (Q5 decimal precision)
+
+reg [31:0] reliability_tmr_scaled;
+reg [31:0] reliability_adaptive_scaled;
+reg [31:0] coverage_scaled;
+reg [31:0] availability_scaled;
+
+reg [31:0] P_tmr_scaled;
+reg [31:0] P_dual_scaled;
+reg [31:0] P_single_scaled;
+
+reg [31:0] R_single_scaled;
+reg [31:0] R_tmr_scaled;
+reg [31:0] R_dual_scaled;
+
+// 64-bit intermediate multiplication (CRITICAL FIX)
+reg [63:0] temp_mult1;
+reg [63:0] temp_mult2;
+
+  // =====================================================
+// RELIABILITY COMPUTATION (OVERFLOW SAFE)
+// =====================================================
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        P_tmr_scaled               <= 0;
+        P_dual_scaled              <= 0;
+        P_single_scaled            <= 0;
+        R_single_scaled            <= 0;
+        R_tmr_scaled               <= 0;
+        R_dual_scaled              <= 0;
+        reliability_tmr_scaled     <= 0;
+        reliability_adaptive_scaled<= 0;
+        coverage_scaled            <= 0;
+        availability_scaled        <= 0;
+    end
+    else if (total_cycles > 0) begin
+
+        // =================================================
+        // MODE PROBABILITIES
+        // =================================================
+
+        P_tmr_scaled    <= (tmr_mode_cycles    * SCALE) / total_cycles;
+        P_dual_scaled   <= (dual_mode_cycles   * SCALE) / total_cycles;
+        P_single_scaled <= (single_mode_cycles * SCALE) / total_cycles;
+
+        // =================================================
+        // BASE CORE RELIABILITY (Assume R = 0.99)
+        // =================================================
+
+        R_single_scaled <= 99000;  // 0.99 × SCALE
+
+        // =================================================
+        // DUAL MODE RELIABILITY (R²)
+        // =================================================
+
+        temp_mult1 = 99000 * 99000;  // 64-bit safe
+        R_dual_scaled <= temp_mult1 / SCALE;
+
+        // =================================================
+        // TMR RELIABILITY (3R² - 2R³)
+        // =================================================
+
+        // Compute R²
+        temp_mult1 = 99000 * 99000;
+        temp_mult1 = temp_mult1 / SCALE;
+
+        // Compute R³ = R² × R
+        temp_mult2 = temp_mult1 * 99000;
+        temp_mult2 = temp_mult2 / SCALE;
+
+        R_tmr_scaled <= (3 * temp_mult1) - (2 * temp_mult2);
+
+        reliability_tmr_scaled <= R_tmr_scaled;
+
+        // =================================================
+        // ADAPTIVE RELIABILITY
+        // =================================================
+
+        temp_mult1 = P_tmr_scaled * R_tmr_scaled;
+        temp_mult1 = temp_mult1 / SCALE;
+
+        temp_mult2 = P_dual_scaled * R_dual_scaled;
+        temp_mult2 = temp_mult2 / SCALE;
+
+        reliability_adaptive_scaled <=
+              temp_mult1
+            + temp_mult2
+            + ((P_single_scaled * R_single_scaled) / SCALE);
+
+        // =================================================
+        // COVERAGE = Detected / Injected
+        // =================================================
+
+        if (injected_fault_count > 0)
+            coverage_scaled <=
+                (mismatch_count * SCALE) / injected_fault_count;
+
+        // =================================================
+        // AVAILABILITY (Approximate)
+        // =================================================
+
+        availability_scaled <= reliability_adaptive_scaled;
+
+    end
+end
+  
+  
+// =====================================================
+// ADAPTIVE EXECUTION SELECTOR (PIPELINE SAFE)
+// =====================================================
+
+reg [31:0] adaptive_pc;
+reg [31:0] adaptive_alu;
+reg adaptive_mem_write;
+reg system_failure_flag;
+
+always @(*) begin
+    system_failure_flag = 1'b0;
+
+    case (healthy_count)
+
+        // ---------------------------------
+        // TMR MODE (3 Healthy)
+        // ---------------------------------
+        3: begin
+            adaptive_pc        = voted_pc;
+            adaptive_alu       = voted_alu_result;
+            adaptive_mem_write = voted_mem_write;
+        end
+
+       // ---------------------------------
+// DUAL MODE (2 Healthy)
+// ---------------------------------
+2: begin
+    if (core_a_healthy && core_b_healthy &&
+        core_a_wb_data == core_b_wb_data) begin
+
+        adaptive_pc  = core_a_pc;
+        adaptive_alu = core_a_alu_result;
+        adaptive_mem_write = core_a_mem_write;
+
+    end
+    else if (core_a_healthy && core_c_healthy &&
+             core_a_wb_data == core_c_wb_data) begin
+
+        adaptive_pc  = core_a_pc;
+        adaptive_alu = core_a_alu_result;
+        adaptive_mem_write = core_a_mem_write;
+
+    end
+    else if (core_b_healthy && core_c_healthy &&
+             core_b_wb_data == core_c_wb_data) begin
+
+        adaptive_pc  = core_b_pc;
+        adaptive_alu = core_b_alu_result;
+        adaptive_mem_write = core_b_mem_write;
+
+    end
+    else begin
+        system_failure_flag = 1'b1;
+    end
+end
+        // ---------------------------------
+        // SINGLE MODE (1 Healthy)
+        // ---------------------------------
+        1: begin
+            if (core_a_healthy) begin
+                adaptive_pc        = core_a_pc;
+                adaptive_alu       = core_a_alu_result;
+                adaptive_mem_write = core_a_mem_write;
+            end
+            else if (core_b_healthy) begin
+                adaptive_pc        = core_b_pc;
+                adaptive_alu       = core_b_alu_result;
+                adaptive_mem_write = core_b_mem_write;
+            end
+            else begin
+                adaptive_pc        = core_c_pc;
+                adaptive_alu       = core_c_alu_result;
+                adaptive_mem_write = core_c_mem_write;
+            end
+        end
+
+        // ---------------------------------
+        // SYSTEM FAILURE
+        // ---------------------------------
+        default: begin
+            adaptive_pc        = 32'hDEAD_DEAD;
+            adaptive_alu       = 32'hDEAD_DEAD;
+            adaptive_mem_write = 1'b0;
+            system_failure_flag = 1'b1;
+        end
+    endcase
+
+    // Common-mode failure detection
+if (temporal_fault_flag || common_mode_fault_flag)
+    system_failure_flag = 1'b1;
+
+end
+  
+  
+    
+    // Instantiate lockstep controller
+    lockstep_controller lockstep_ctrl (
+        .clk(clk),
+        .rst(rst),
+        .voter_state(voter_state),
+        .voted_data(voted_alu_result),
+        .recovery_mode(recovery_mode),
+        .lockstep_mode(lockstep_mode),
+        .mux_data_sel(mux_data_sel),
+        .mux_instr_sel(mux_instr_sel),
+        .demux_sel(demux_sel),
+        .lockstep_instruction(lockstep_instruction),
+        .rollback_enable(rollback_enable),
+        .partial_rollback(partial_rollback),
+        .full_rollback(full_rollback)
+    );
+    
+    // Instantiate recovery register
+    recovery_register recovery_reg (
+        .clk(clk),
+        .rst(rst),
+        .write_enable(lockstep_mode | partial_rollback),
+        .read_enable(full_rollback),
+        .addr(5'b00001),
+        .write_data(voted_alu_result),
+        .read_data(recovery_read_data),
+        .pc_backup(voted_pc),
+        .pc_write_enable(lockstep_mode),
+        .pc_restore(recovery_pc_restore)
+    );
+
+ 
+reg recovery_mode_d;
+reg lockstep_mode_d;
+  
+reg mismatch_d;
+
+always @(posedge clk or posedge rst) begin
+    if (rst)
+        mismatch_d <= 0;
+    else
+        mismatch_d <= (voter_state != 3'b111);
+end  
+
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        recovery_mode_d <= 0;
+        lockstep_mode_d <= 0;
+    end else begin
+        recovery_mode_d <= recovery_mode;
+        lockstep_mode_d <= lockstep_mode;
+    end
+end  
+  
+  always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        total_cycles        <= 0;
+        mismatch_count      <= 0;
+        partial_fault_count <= 0;
+        full_fault_count    <= 0;
+        recovery_count      <= 0;
+        lockstep_count      <= 0;
+    end
+    else begin
+        total_cycles <= total_cycles + 1;
+
+      
+      
+        // Any mismatch
+if ((voter_state != 3'b111) && !mismatch_d)
+    mismatch_count <= mismatch_count + 1;
+
+if ((voter_state != 3'b111 && voter_state != 3'b000) && !mismatch_d)
+    partial_fault_count <= partial_fault_count + 1;
+
+if ((voter_state == 3'b000) && !mismatch_d)
+    full_fault_count <= full_fault_count + 1;
+
+if (recovery_mode && !recovery_mode_d)
+    recovery_count <= recovery_count + 1;
+
+if (lockstep_mode && !lockstep_mode_d)
+    lockstep_count <= lockstep_count + 1;
+    end
+end
+  
+assign final_pc         = adaptive_pc;
+assign final_alu_result = adaptive_alu;
+assign final_mem_write  = adaptive_mem_write;
+assign final_data_addr  = adaptive_alu;
+assign final_write_data = voted_write_data;
+
+assign system_failure_out = system_failure_flag;
+  
+    // Output assignments
+
+   assign final_mem_read =
+    (core_a_mem_read & core_b_mem_read) |
+    (core_b_mem_read & core_c_mem_read) |
+    (core_a_mem_read & core_c_mem_read);
+    assign error_detected = (voter_state != 3'b111);
+    assign recovery_active = recovery_mode;
+    assign total_cycles_out  = total_cycles;
+assign mismatch_count_out = mismatch_count;
+assign partial_fault_out  = partial_fault_count;
+assign full_fault_out     = full_fault_count;
+assign injected_fault_out = injected_fault_count;
+
+endmodule
