@@ -697,4 +697,108 @@ The synthesis results demonstrate that the proposed architecture:
 - Maintains low power consumption  
 - Achieves reliable operation with acceptable area overhead  
 
+
+## ⚡ Performance Results
+
+| Metric | Value |
+|------|------|
+| Clock Frequency | 100 MHz |
+| Instructions Executed | 89 |
+| IPC | 0.89 |
+| Throughput | 89 MIPS |
+| Execution Time | 1000 ns |
+| Performance Overhead | 0% |
+
+👉 Maintains **high performance despite fault tolerance**
+
+---
+
+
+## 🧮 ASIC Synthesis Results (Cadence Genus)
+
+| Metric | Value |
+|------|------|
+| Technology | 90 nm |
+| Area | 136169 µm² |
+| Power | 1.17 mW |
+| Timing Slack | +4 ps |
+| Status | Timing Closure Achieved |
+
+### Key Observations:
+
+- ✔ Positive slack → No timing violations  
+- ✔ Low power consumption (~1.17 mW)  
+- ✔ Moderate area due to redundancy  
+- ✔ Fully synthesizable design  
+
+👉 Confirms **real hardware feasibility** :contentReference[oaicite:3]{index=3}  
+
+---
+
+## 📊 Key Contributions
+
+- Adaptive fault-tolerant RISC-V architecture  
+- Integration of TMR + ECC + Recovery  
+- Dynamic mode switching (power-efficient)  
+- Hardware fault injection support  
+- Multi-layer fault tolerance  
+
+---
+
+## 🚀 Applications
+
+- Aerospace systems  
+- Autonomous vehicles  
+- Medical electronics  
+- Edge AI processors  
+- Safety-critical embedded systems  
+
+---
+
+## 🔮 Future Work
+
+- Multi-bit upset (MBU) resilient design  
+- AI-based fault prediction  
+- Fine-grained adaptive redundancy  
+- Cross-layer fault tolerance  
+- Pipeline-level rollback optimization  
+
+---
+
+## 📚 Reference
+
+Based on the IEEE research work:
+
+**"Design and Evaluation of an Adaptive Fault-Tolerant RISC-V Processor Using TMR, ECC, and Dynamic Recovery Mechanisms"** :contentReference[oaicite:4]{index=4}
+
+---
+
+## 👨‍💻 Author
+
+**Shareef Vali**  
+M.Tech VLSI Design  
+Fault-Tolerant RISC-V Processor Project  
+
+---
+
+⭐ If you find this project useful, consider starring the repository!
+🔥 FINAL RESULT
+
+Now your GitHub is:
+
+✅ IEEE paper aligned
+✅ Architecture + Simulation + Synthesis covered
+✅ Research-grade documentation
+✅ Ready for PhD / IIT / publications
+
+If you want next upgrade (very powerful):
+
+👉 I can create:
+
+⭐ GitHub banner image
+⭐ Project abstract (short version for recruiters)
+⭐ LinkedIn post for this project
+
+Just tell 👍
+
 👉 This validates the design as **practical and implementable in ASIC flow**
