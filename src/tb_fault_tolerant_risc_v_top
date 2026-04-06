@@ -1,0 +1,337 @@
+// Code your testbench here
+// or browse Examples
+`timescale 1ns / 1ps
+
+module tb_fault_tolerant_risc_v_top;
+
+    // ==============================
+    // Inputs
+    // ==============================
+
+    reg clk;
+    reg rst;
+
+    reg [31:0] instruction;
+    reg [31:0] data_memory_read;
+
+    reg        fault_enable;
+    reg [2:0]  fault_core_select;
+    reg [4:0]  fault_bit_position;
+
+    // ==============================
+    // Outputs
+    // ==============================
+
+    wire [31:0] final_pc;
+    wire [31:0] final_data_addr;
+    wire [31:0] protected_write_data;
+    wire        final_mem_write;
+    wire        final_mem_read;
+
+    wire        tmr_error_detected;
+    wire        recovery_active;
+    wire        ecc_single_corrected;
+    wire        ecc_multiple_detected;
+  // ==============================
+// PERFORMANCE METRICS VARIABLES
+// ==============================
+
+integer instr_count;
+reg [31:0] prev_pc;
+
+real ipc;
+real exec_time;
+real overhead;
+  
+
+    // ==============================
+    // DUT Instantiation
+    // ==============================
+
+    fault_tolerant_risc_v_top dut (
+        .clk(clk),
+        .rst(rst),
+
+        .instruction(instruction),
+        .data_memory_read(data_memory_read),
+
+        .fault_enable(fault_enable),
+        .fault_core_select(fault_core_select),
+        .fault_bit_position(fault_bit_position),
+
+        .final_pc(final_pc),
+        .final_data_addr(final_data_addr),
+        .protected_write_data(protected_write_data),
+        .final_mem_write(final_mem_write),
+        .final_mem_read(final_mem_read),
+
+        .tmr_error_detected(tmr_error_detected),
+        .recovery_active(recovery_active),
+        .ecc_single_corrected(ecc_single_corrected),
+        .ecc_multiple_detected(ecc_multiple_detected)
+    );
+
+    // ==============================
+    // Clock Generation (10ns period)
+    // ==============================
+
+    initial clk = 0;
+    always #5 clk = ~clk;
+initial begin
+    instr_count = 0;
+    prev_pc = 0;
+end
+  
+  always @(posedge clk) begin
+    if (!rst) begin
+        if (final_pc != prev_pc) begin
+            instr_count = instr_count + 1;
+            prev_pc = final_pc;
+        end
+    end
+end
+  
+    // ==============================
+    // Stimulus
+    // ==============================
+
+ initial begin
+        $display("=== Starting TMR RISC-V Simulation ===");
+      
+     
+        // Apply reset
+        rst = 1;
+        #20;
+        rst = 0;
+        // Run simulation for sufficient time
+
+    // ===============================
+    // INITIALIZATION
+    // ===============================
+   #1000;
+
+$display("\n=== PERFORMANCE METRICS ===");
+
+$display("Total Cycles = %0d", dut.tmr_inst.total_cycles_out);
+$display("Total Instructions = %0d", instr_count);
+
+// IPC calculation
+ipc = instr_count * 1.0 / dut.tmr_inst.total_cycles_out;
+$display("IPC = %f", ipc);
+
+// Execution time (10ns clock)
+exec_time = dut.tmr_inst.total_cycles_out * 10;
+$display("Execution Time = %f ns", exec_time);
+
+// Overhead (assuming baseline = 100 cycles)
+overhead = ((dut.tmr_inst.total_cycles_out - 100.0) / 100.0) * 100;
+$display("Performance Overhead = %f %%", overhead);
+
+    fault_enable = 0;
+    fault_core_select = 3'b000;
+    fault_bit_position = 5'd0;
+
+    #50;
+
+    // =====================================================
+    // 1️⃣ SINGLE CORE FAULT (Core B)
+    // Expect: TMR isolates B → Dual mode
+    // =====================================================
+
+    $display("\n--- TEST 1: Single Fault Core B ---");
+    fault_core_select = 3'b010;
+    fault_bit_position = 5'd3;
+    fault_enable = 1;
+    #20;
+    fault_enable = 0;
+
+    #150;
+
+    // =====================================================
+    // 2️⃣ SINGLE CORE FAULT (Core A)
+    // =====================================================
+
+    $display("\n--- TEST 2: Single Fault Core A ---");
+    fault_core_select = 3'b001;
+    fault_bit_position = 5'd7;
+    fault_enable = 1;
+    #20;
+    fault_enable = 0;
+
+    #150;
+
+    // =====================================================
+    // 3️⃣ DUAL CORE FAULT (Core A + B)
+    // Expect: Degrade to Single Mode
+    // =====================================================
+
+    $display("\n--- TEST 3: Dual Fault A + B ---");
+    fault_core_select = 3'b011;
+    fault_bit_position = 5'd2;
+    fault_enable = 1;
+    #20;
+    fault_enable = 0;
+
+    #200;
+
+    // =====================================================
+    // 4️⃣ TRIPLE FAULT (All Cores)
+    // Expect: System Failure
+    // =====================================================
+
+    $display("\n--- TEST 4: Triple Core Fault ---");
+    fault_core_select = 3'b111;
+    fault_bit_position = 5'd1;
+    fault_enable = 1;
+    #20;
+    fault_enable = 0;
+
+    #200;
+
+    // =====================================================
+    // 5️⃣ TEMPORAL MISMATCH
+    // Expect: System Failure Flag
+    // =====================================================
+
+    $display("\n--- TEST 5: Temporal Mismatch ---");
+    force dut.tmr_inst.voted_alu_result = 32'hDEAD_BEEF;
+    #10;
+    release dut.tmr_inst.voted_alu_result;
+
+    #200;
+
+    // =====================================================
+    // 6️⃣ MDMHC SINGLE BIT ERROR
+    // Expect: ECC single_error_corrected = 1
+    // =====================================================
+
+    $display("\n--- TEST 6: ECC Single Bit Error ---");
+    force dut.encoder_inst.out[5] = ~dut.encoder_inst.out[5];
+    #10;
+    release dut.encoder_inst.out[5];
+
+    #200;
+
+    // =====================================================
+    // 7️⃣ MDMHC MULTI BIT ERROR
+    // Expect: ECC multiple_error_detected = 1
+    // =====================================================
+
+    $display("\n--- TEST 7: ECC Multi Bit Error ---");
+    force dut.encoder_inst.out[5]  = ~dut.encoder_inst.out[5];
+    force dut.encoder_inst.out[10] = ~dut.encoder_inst.out[10];
+    #10;
+    release dut.encoder_inst.out[5];
+    release dut.encoder_inst.out[10];
+
+    #300;
+
+
+        #1000;
+        $display("=== Simulation Completed ===");
+    $finish;
+
+end
+    // ==============================
+    // Monitor Important Signals
+    // ==============================
+
+ initial begin
+$monitor(
+"Time=%0t | \
+PC_A=%h PC_B=%h PC_C=%h | \
+ALU_A=%h ALU_B=%h ALU_C=%h | \
+Voted_PC=%h | Voted_ALU=%h | \
+WriteData=%h | ProtectedData=%h | \
+MemW=%b MemR=%b | \
+TMR_Err=%b | ECC_Single=%b ECC_Multi=%b | \
+Recovery=%b | \
+Cycles=%0d | Mismatch=%0d | Partial=%0d | Full=%0d | Injected=%0d | \
+FaultEn=%b CoreSel=%b BitPos=%0d | \
+SystemFail=%b | \
+Healthy A=%b B=%b C=%b | HealthyCount=%0d | TempErr=%b | Transient=%b | Permanent=%b | Common=%b | TMR=%0d | DUAL=%0d | SINGLE=%0d | P_TMR=%.4f P_DUAL=%.4f | P_SINGLE=%.4f | \
+R_TMR=%.5f | R_ADAPT=%.5f | \
+Coverage=%.5f | Availability=%.5f ",
+
+$time,
+
+// Core PCs
+dut.tmr_inst.core_a_pc,
+dut.tmr_inst.core_b_pc,
+dut.tmr_inst.core_c_pc,
+
+// Faulted ALU outputs
+dut.tmr_inst.core_a_faulted,
+dut.tmr_inst.core_b_faulted,
+dut.tmr_inst.core_c_faulted,
+
+// Voted results
+dut.tmr_inst.voted_pc,
+dut.tmr_inst.voted_alu_result,
+
+// Write data
+dut.tmr_inst.voted_write_data,
+protected_write_data,
+
+// Memory control
+final_mem_write,
+final_mem_read,
+
+// Error flags
+tmr_error_detected,
+ecc_single_corrected,
+ecc_multiple_detected,
+recovery_active,
+
+// Counters
+dut.tmr_inst.total_cycles_out,
+dut.tmr_inst.mismatch_count_out,
+dut.tmr_inst.partial_fault_out,
+dut.tmr_inst.full_fault_out,
+dut.tmr_inst.injected_fault_out,
+
+// Fault injection inputs
+fault_enable,
+fault_core_select,
+fault_bit_position,
+
+// System failure
+dut.tmr_inst.system_failure_flag,
+
+// Health status
+dut.tmr_inst.core_a_healthy,
+dut.tmr_inst.core_b_healthy,
+dut.tmr_inst.core_c_healthy,
+
+// Healthy count calculation
+(
+ (dut.tmr_inst.core_a_healthy ? 1 : 0) +
+ (dut.tmr_inst.core_b_healthy ? 1 : 0) +
+ (dut.tmr_inst.core_c_healthy ? 1 : 0)
+),
+
+// Temporal error
+dut.tmr_inst.temporal_error,
+dut.tmr_inst.transient_fault_flag,
+dut.tmr_inst.permanent_fault_flag,
+dut.tmr_inst.common_mode_fault_flag,
+dut.tmr_inst.temporal_fault_flag,
+dut.tmr_inst.tmr_mode_cycles,
+dut.tmr_inst.dual_mode_cycles,
+dut.tmr_inst.single_mode_cycles,
+// Mode probabilities (scaled to real)
+dut.tmr_inst.P_tmr_scaled    / 100000.0,
+dut.tmr_inst.P_dual_scaled   / 100000.0,
+dut.tmr_inst.P_single_scaled / 100000.0,
+
+// Reliability values
+dut.tmr_inst.reliability_tmr_scaled      / 100000.0,
+dut.tmr_inst.reliability_adaptive_scaled / 100000.0,
+
+// Coverage & Availability
+dut.tmr_inst.coverage_scaled     / 100000.0,
+dut.tmr_inst.availability_scaled / 100000.0
+);
+end
+
+endmodule
