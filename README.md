@@ -485,3 +485,216 @@ The MDMHC ECC module ensures:
 
 This significantly improves system reliability when combined with TMR and adaptive recovery mechanisms.
 
+
+## Simulation Results
+
+The proposed adaptive fault-tolerant RISC-V processor was validated using a comprehensive Verilog testbench with hardware fault injection. The simulation evaluates system behavior under multiple fault scenarios including single-core faults, dual-core faults, triple-core faults, temporal mismatches, and ECC-based memory errors.
+
+Initially, all three cores operate correctly in TMR mode, producing identical outputs. The majority voter ensures correct execution by selecting the consistent output among the three cores.
+These are instructions are stored and run for this project
+### Instruction Execution Validation
+
+The processor correctly executes the loaded instruction sequence:
+
+Hex Program:
+13 02 80 02
+93 80 40 00
+83 A1 00 00
+23 A2 30 00
+E3 9A 40 FE
+
+The simulation shows:
+- Proper instruction fetch (PC increments)
+- Correct ALU operations
+- Valid register write-back
+
+This verifies functional correctness of the pipeline.
+
+
+### Normal Operation (TMR Mode)
+<img width="2404" height="1046" alt="rv32i (2)" src="https://github.com/user-attachments/assets/fee3221e-ba38-4643-b3d1-005dd3c31095" />
+<img width="2234" height="386" alt="cnn_tmr" src="https://github.com/user-attachments/assets/5466358e-ec45-4ce8-baa9-ec4775efbdf2" />
+
+
+During fault-free execution, all three cores (Core A, B, and C) produce identical ALU outputs and program counters.
+
+- Healthy State: A=1, B=1, C=1
+- Mode: TMR
+- Voted Output = All cores match
+
+This confirms correct baseline functionality of the processor.
+
+### Single Core Fault Detection and Masking
+<img width="2446" height="1132" alt="fault_injection" src="https://github.com/user-attachments/assets/11de753d-7c19-4565-b697-15e524454759" />
+
+When a fault is injected into one core (e.g., Core B), the faulty core produces incorrect ALU output, while the remaining two cores continue correct execution.
+
+- Example:
+  ALU_A = 00000004  
+  ALU_B = 0000000C (faulty)  
+  ALU_C = 00000004  
+
+The majority voter correctly selects the valid output:
+- Voted_ALU = 00000004
+
+System Response:
+- TMR Error Detected = 1
+- Recovery Activated = 1
+- Mode transitions from TMR → Dual Mode
+
+This demonstrates successful fault masking using TMR.
+
+### Triple Core Fault Condition
+
+<img width="2470" height="868" alt="fault_detection temporal_reduancy" src="https://github.com/user-attachments/assets/9fb70ae9-f0ac-4ed4-92b3-efa99a3e6209" />
+
+When all three cores are faulty, the system is unable to produce a valid output.
+
+Observed:
+- ALU outputs: invalid or identical faulty values
+- Voted output unreliable
+
+System Response:
+- SystemFail flag = 1
+- Recovery cannot restore correctness immediately
+
+This represents worst-case failure scenario.
+
+### Adaptive Mode Switching
+<img width="2444" height="1188" alt="health_montoring" src="https://github.com/user-attachments/assets/94e5dfe7-252e-481f-8512-4d365f4bce83" />
+
+The processor dynamically adjusts its operating mode based on the number of healthy cores:
+
+| Healthy Cores | Mode        |
+|--------------|------------|
+| 3            | TMR        |
+| 2            | Dual Mode  |
+| 1            | Single Mode |
+<img width="2466" height="1024" alt="lock+recv+pr+fr" src="https://github.com/user-attachments/assets/21638d03-3257-4251-9d11-341ac41ddc7e" />
+
+Example:
+- Healthy = 111 → TMR
+- Healthy = 101 → Dual
+- Healthy = 001 → Single
+
+This ensures optimal trade-off between reliability and resource utilization.
+
+### Fault Classification
+<img width="2438" height="1088" alt="fault_classfication" src="https://github.com/user-attachments/assets/a8913cf2-6ede-44cf-9ab9-54039d82c4f7" />
+
+
+The system classifies faults into:
+- Transient faults
+- Permanent faults
+- Common-mode faults
+
+This classification enables intelligent recovery and adaptive operation.
+
+### ECC-Based Memory Protection
+<img width="2458" height="1188" alt="ecc" src="https://github.com/user-attachments/assets/374479c9-1fca-45df-98d1-fc2541a042f3" />
+
+The MDMHC-based ECC module provides:
+
+- Single-bit error correction
+- Multi-bit error detection
+
+Observed behavior:
+- ECC_Single = 1 → error corrected
+- ECC_Multi = 1 → error detected (uncorrectable)
+
+This ensures data integrity in memory operations.
+
+### Reliability and Coverage Analysis
+<img width="2458" height="1134" alt="RELIABILITY METRICS" src="https://github.com/user-attachments/assets/747f48b6-84ca-4661-88df-c0a3772bff57" />
+
+The system computes runtime reliability metrics:
+
+- Reliability (R_ADAPT) ≈ 0.99
+- Coverage ≈ 1.0 (for single faults)
+- Availability ≈ 0.99+
+
+These values confirm strong fault tolerance and system robustness under varying fault conditions.
+
+## Synthesis Results (ASIC Implementation)
+
+The proposed fault-tolerant RISC-V processor was synthesized using **Cadence Genus** with a standard-cell library under worst-case operating conditions.
+
+---
+
+## 🔹 1. Timing Analysis
+
+- **Worst Case Setup Slack:** +4 ps  
+- **Status:** Timing Closure Achieved ✅  
+
+### Interpretation:
+- Positive slack indicates that all timing constraints are satisfied  
+- The design operates correctly under worst-case delay conditions  
+- No setup violations observed  
+
+👉 This confirms the design is **timing-safe and stable**
+
+---
+
+## 🔹 2. Area Analysis
+
+| Metric | Value |
+|------|------|
+| Total Cell Count | 22,463 |
+| Total Cell Area | 136,169.337 µm² |
+
+### Interpretation:
+- Area includes:
+  - 3 RISC-V cores (TMR)
+  - Voter logic
+  - ECC (MDMHC)
+  - Control & recovery units  
+
+👉 Area overhead is expected due to redundancy but remains **manageable**
+
+---
+
+## 🔹 3. Power Analysis
+
+| Power Type | Value | Percentage |
+|----------|------|-----------|
+| Leakage Power | 5.63e-04 W | 47.98% |
+| Internal Power | 4.47e-04 W | 38.13% |
+| Switching Power | 1.63e-04 W | 13.90% |
+| **Total Power** | **1.17455 mW** | 100% |
+
+---
+
+### Interpretation:
+
+- **Leakage dominates (~48%)**
+  → Due to deep submicron effects  
+
+- **Logic contributes ~68.59% of power**
+  → Core computation + TMR overhead  
+
+- **Switching power is relatively low**
+  → Indicates efficient activity control  
+
+👉 Overall power is **low (~1.17 mW)** → suitable for embedded systems
+
+---
+
+## 🔹 4. Key Observations
+
+✔ Successful synthesis without errors  
+✔ Timing closure achieved  
+✔ Moderate area overhead due to fault tolerance  
+✔ Low total power consumption  
+✔ Suitable for reliability-critical applications  
+
+---
+
+## 🎯 Summary
+
+The synthesis results demonstrate that the proposed architecture:
+
+- Meets timing constraints  
+- Maintains low power consumption  
+- Achieves reliable operation with acceptable area overhead  
+
+👉 This validates the design as **practical and implementable in ASIC flow**
