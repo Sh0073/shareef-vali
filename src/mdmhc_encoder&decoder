@@ -1,0 +1,128 @@
+
+module mdmhc_encoder(
+    input  wire        clk,
+    input  wire [31:0] in,
+    output reg  [67:0] out
+);
+
+reg [15:0] v;
+reg [19:0] h;
+
+always @(posedge clk) begin
+
+    // Vertical parity
+    v[0]  <= in[0]  ^ in[16];
+    v[1]  <= in[1]  ^ in[17];
+    v[2]  <= in[2]  ^ in[18];
+    v[3]  <= in[3]  ^ in[19];
+    v[4]  <= in[4]  ^ in[20];
+    v[5]  <= in[5]  ^ in[21];
+    v[6]  <= in[6]  ^ in[22];
+    v[7]  <= in[7]  ^ in[23];
+    v[8]  <= in[8]  ^ in[24];
+    v[9]  <= in[9]  ^ in[25];
+    v[10] <= in[10] ^ in[26];
+    v[11] <= in[11] ^ in[27];
+    v[12] <= in[12] ^ in[28];
+    v[13] <= in[13] ^ in[29];
+    v[14] <= in[14] ^ in[30];
+    v[15] <= in[15] ^ in[31];
+
+    // Horizontal parity
+    h[4:0]   <= in[3:0]   + in[11:8];
+    h[9:5]   <= in[7:4]   + in[15:12];
+    h[14:10] <= in[27:24] + in[19:16];
+    h[19:15] <= in[31:28] + in[23:20];
+
+    out <= {v, h, in};
+
+end
+
+endmodule
+`timescale 1ns / 1ps
+
+module mdmhc_decoder(
+    input  wire        clk,
+    input  wire [67:0] in,
+    output reg  [31:0] outer,
+    output reg         single_error_corrected,
+    output reg         multiple_error_detected
+);
+
+reg [31:0] data;
+reg [15:0] v_rx;
+reg [19:0] h_rx;
+
+reg [15:0] v_calc;
+reg [19:0] h_calc;
+
+reg [15:0] v_syn;
+reg [19:0] h_syn;
+
+integer i;
+integer col_count;
+integer col_index;
+
+always @(posedge clk) begin
+
+    // Extract fields (blocking for internal use)
+    data = in[31:0];
+    v_rx = in[67:52];
+    h_rx = in[51:32];
+
+    // Default outputs
+    outer <= data;
+    single_error_corrected <= 1'b0;
+    multiple_error_detected <= 1'b0;
+
+    // Recalculate vertical parity
+    v_calc[0]  = data[0]  ^ data[16];
+    v_calc[1]  = data[1]  ^ data[17];
+    v_calc[2]  = data[2]  ^ data[18];
+    v_calc[3]  = data[3]  ^ data[19];
+    v_calc[4]  = data[4]  ^ data[20];
+    v_calc[5]  = data[5]  ^ data[21];
+    v_calc[6]  = data[6]  ^ data[22];
+    v_calc[7]  = data[7]  ^ data[23];
+    v_calc[8]  = data[8]  ^ data[24];
+    v_calc[9]  = data[9]  ^ data[25];
+    v_calc[10] = data[10] ^ data[26];
+    v_calc[11] = data[11] ^ data[27];
+    v_calc[12] = data[12] ^ data[28];
+    v_calc[13] = data[13] ^ data[29];
+    v_calc[14] = data[14] ^ data[30];
+    v_calc[15] = data[15] ^ data[31];
+
+    // Recalculate horizontal parity
+    h_calc[4:0]   = data[3:0]   + data[11:8];
+    h_calc[9:5]   = data[7:4]   + data[15:12];
+    h_calc[14:10] = data[27:24] + data[19:16];
+    h_calc[19:15] = data[31:28] + data[23:20];
+
+    // Compute syndrome
+    v_syn = v_calc ^ v_rx;
+    h_syn = h_calc ^ h_rx;
+
+    // Count vertical mismatches
+    col_count = 0;
+    col_index = 0;
+
+    for (i = 0; i < 16; i = i + 1) begin
+        if (v_syn[i]) begin
+            col_count = col_count + 1;
+            col_index = i;
+        end
+    end
+
+    // Single-bit correction
+    if ((col_count == 1) && (h_syn != 0)) begin
+        outer[col_index] <= ~data[col_index];
+        single_error_corrected <= 1'b1;
+    end
+    else if ((v_syn != 0) || (h_syn != 0)) begin
+        multiple_error_detected <= 1'b1;
+    end
+
+end
+
+endmodule  
