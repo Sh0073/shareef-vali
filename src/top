@@ -1,0 +1,112 @@
+// Code your design here
+`timescale 1ns/1ps
+`include "top.v"
+module fault_tolerant_risc_v_top (
+
+    input  wire        clk,
+    input  wire        rst,
+
+    // Instruction + Memory Interface
+    input  wire [31:0] instruction,
+    input  wire [31:0] data_memory_read,
+
+    // Fault injection for TMR cores
+    input  wire        fault_enable,
+    input  wire [2:0]  fault_core_select,
+    input  wire [4:0]  fault_bit_position,
+
+    // Outputs
+    output wire [31:0] final_pc,
+    output wire [31:0] final_data_addr,
+    output wire [31:0] protected_write_data,
+    output wire        final_mem_write,
+    output wire        final_mem_read,
+
+    // Reliability Flags
+    output wire        tmr_error_detected,
+    output wire        recovery_active,
+    output wire        ecc_single_corrected,
+    output wire        ecc_multiple_detected
+
+);
+
+    // ==============================
+    // TMR SYSTEM OUTPUT WIRES
+    // ==============================
+
+    wire [31:0] tmr_write_data;
+    wire [31:0] tmr_data_addr;
+    wire        tmr_mem_write;
+    wire        tmr_mem_read;
+  
+  
+      // ==============================
+    // MDMHC ENCODER
+    // ==============================
+
+    wire [67:0] encoded_data;
+
+    mdmhc_encoder encoder_inst (
+        .clk(clk),
+        .in(tmr_write_data),
+        .out(encoded_data)
+    );
+
+
+    // ==============================
+    // Instantiate TMR Core System
+    // ==============================
+
+    tmr_risc_v_system tmr_inst (
+        .clk(clk),
+        .rst(rst),
+        .instruction(instruction),
+        .data_memory_read(data_memory_read),
+
+        .fault_enable(fault_enable),
+        .fault_core_select(fault_core_select),
+        .fault_bit_position(fault_bit_position),
+
+        .final_pc(final_pc),
+        .final_alu_result(),
+        .final_write_data(tmr_write_data),
+        .final_data_addr(tmr_data_addr),
+        .final_mem_write(tmr_mem_write),
+        .final_mem_read(tmr_mem_read),
+
+        .error_detected(tmr_error_detected),
+        .recovery_active(recovery_active),
+
+        .total_cycles_out(),
+        .mismatch_count_out(),
+        .partial_fault_out(),
+        .full_fault_out(),
+        .injected_fault_out(),
+        .system_failure_out()
+    );
+
+
+    // ==============================
+    // MDMHC DECODER
+    // ==============================
+
+    wire [31:0] corrected_data;
+
+    mdmhc_decoder decoder_inst (
+        .clk(clk),
+        .in(encoded_data),
+        .outer(corrected_data),
+        .single_error_corrected(ecc_single_corrected),
+        .multiple_error_detected(ecc_multiple_detected)
+    );
+
+    // ==============================
+    // Final Protected Outputs
+    // ==============================
+
+    assign protected_write_data = corrected_data;
+    assign final_data_addr      = tmr_data_addr;
+    assign final_mem_write      = tmr_mem_write;
+    assign final_mem_read       = tmr_mem_read;
+
+endmodule
